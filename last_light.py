@@ -1071,10 +1071,11 @@ class Player(Entity):
         self.beam.enabled = active
 
     def add_recoil(self, kick):
-        self.pitch -= kick * 0.32
+        # Most of the kick stays on the gun. A little climbs the view so you can still track.
+        self.pitch -= kick * 0.11
         self.pitch = clamp(self.pitch, -87, 87)
-        self.recoil -= kick * 0.9
-        self.yaw_kick += random.uniform(-kick * 0.22, kick * 0.22)
+        self.recoil -= kick * 0.55
+        self.yaw_kick += random.uniform(-kick * 0.1, kick * 0.1)
 
     def revive(self, pos):
         self.position = Vec3(pos.x, 0.02, pos.z)
@@ -1462,6 +1463,19 @@ class Enemy(Entity):
                 parent=self, model='cube', position=(0, 1.18 * b, 0),
                 scale=(0.92 * b, 0.28 * b, 0.42 * b), color=self.body_color,
             )
+        elif self.kind == 'shooter':
+            Entity(
+                parent=self, model='cube', position=(0.34 * b, 1.02 * b, 0.22 * b),
+                scale=(0.05 * b, 0.05 * b, 0.46 * b), color=color.rgb(0.12, 0.13, 0.15),
+            )
+        self.tell = Entity(
+            parent=self, model=Circle(resolution=28, radius=0.5, mode='line', thickness=3),
+            rotation_x=90, y=0.045, scale=1.1, color=self.eye_color, shader=unlit_shader, enabled=False,
+        )
+        self.beacon = Entity(
+            parent=self, model='cube', position=(0, 1.35 * b, 0),
+            scale=(0.055 * b, 2.5, 0.055 * b), color=self.eye_color, shader=unlit_shader,
+        )
         self.bar_bg = Entity(
             model='quad', scale=(0.74, 0.055), color=color.rgba32(0, 0, 0, 180),
             billboard=True, shader=unlit_shader, enabled=False,
@@ -1502,6 +1516,9 @@ class Enemy(Entity):
         game.kills += 1
         game.hud.toast(f'{self.kind.upper()} DOWN')
         sounds.play('tick', 0.4, pitch=0.8)
+        self.body.color = self.body_color
+        self.tell.enabled = False
+        self.beacon.enabled = False
         if self.bar_bg:
             retire(self.bar_bg)
             self.bar_bg = None
@@ -1519,8 +1536,15 @@ class Enemy(Entity):
             return
         if self.spawning > 0:
             self.spawning -= dt
-            self.body.color = color.white if int(time.time() * 16) % 2 == 0 else self.body_color
+            arrived = 1 - clamp(self.spawning / 0.45, 0, 1)
+            self.body.color = lerp(color.rgb(0.05, 0.05, 0.06), self.body_color, arrived)
+            self.beacon.enabled = True
+            self.beacon.scale_y = 0.4 + arrived * 2.2
+            if self.spawning <= 0:
+                self.body.color = self.body_color
+                self.beacon.enabled = False
             return
+        self.beacon.enabled = False
         self.attack_cd = max(0, self.attack_cd - dt)
         self._perceive(dt)
         self._act(dt)
@@ -1530,10 +1554,10 @@ class Enemy(Entity):
 
     def _death(self, dt):
         self.death_t += dt
-        self.rotation_x = 0
-        self.rotation_z = damp(self.rotation_z, 86, 5, dt)
-        self.y -= dt * 0.22
-        if self.death_t > 1.25:
+        self.rotation_z = damp(self.rotation_z, 0, 10, dt)
+        self.rotation_x = damp(self.rotation_x, 82, 6, dt)
+        self.y = max(-0.45, self.y - dt * 0.45)
+        if self.death_t > 1.35:
             retire(self)
 
     def _perceive(self, dt):
@@ -1645,7 +1669,7 @@ class Enemy(Entity):
     def _act_chaser(self, dt):
         dist = distance_xz(self, player)
         if self.swinging or (self.see and dist < 1.7 and self.attack_cd <= 0):
-            self._melee(dt, 15, 1.95, 0.27, 0.88)
+            self._melee(dt, 15, 1.95, 0.38, 0.92)
             return
         wish = self._wish(self.see and dist < 12)
         if self.see and dist < 1.35:
@@ -1769,6 +1793,19 @@ class Enemy(Entity):
         pulse = 1 + 0.1 * math.sin(time.time() * (8 if self.see else 3))
         self.eye_l.scale = 0.055 * self.bulk * pulse
         self.eye_r.scale = 0.055 * self.bulk * pulse
+        warning = self.swinging or (self.kind == 'brute' and self.mode in ('windup', 'charge'))
+        self.tell.enabled = warning
+        if self.swinging:
+            k = 1 - self.swing_t / max(0.01, self.swing_windup)
+            self.tell.scale = lerp(0.55, 2.15, clamp(k, 0, 1))
+            self.tell.color = self.eye_color
+        elif self.kind == 'brute' and self.mode == 'windup':
+            k = 1 - self.timer / 0.74
+            self.tell.scale = lerp(0.7, 2.8, clamp(k, 0, 1))
+            self.tell.color = color.rgb32(255, 90, 40)
+        elif self.kind == 'brute' and self.mode == 'charge':
+            self.tell.scale = 1.35
+            self.tell.color = color.rgb32(255, 210, 120)
 
     def _bar(self):
         if not self.bar_bg or not self.bar_bg.enabled:
@@ -1841,11 +1878,12 @@ class Pickup(Entity):
             if player.hp >= player.max_hp:
                 return
             player.hp = min(player.max_hp, player.hp + HEALTH_PICKUP)
-            player.hurt_flash = max(player.hurt_flash, 0.05)
+            DamageNumber(self.world_position + Vec3(0, 0.45, 0), f'+{HEALTH_PICKUP}', self.tint, 22)
         else:
             if player.rifle.reserve >= RESERVE_MAX:
                 return
             player.rifle.reserve = min(RESERVE_MAX, player.rifle.reserve + AMMO_PICKUP)
+            DamageNumber(self.world_position + Vec3(0, 0.45, 0), f'+{AMMO_PICKUP}', self.tint, 22)
         sounds.play('pickup', 0.55, pitch=1.05 if self.kind == 'H' else 0.9)
         self.ready = False
         self.timer = 18 if self.kind == 'H' else 14
@@ -1931,6 +1969,8 @@ class HUD:
         self.kills = ui_text(self.root, 'KILLS  0', px=15, color=color.rgb32(210, 214, 220), origin=(-0.5, 0))
         self.ammo = ui_text(self.root, '30  |  090', px=26, color=color.rgb32(240, 242, 245), origin=(0.5, 0))
         self.ammo_label = ui_text(self.root, 'AMMO', px=12, color=color.rgb32(170, 176, 184), origin=(0.5, 0))
+        self.rl_bg = Entity(parent=self.root, model='quad', origin=(0.5, 0), scale=(0.18, 0.007), color=color.rgba32(0, 0, 0, 160), shader=unlit_shader, z=-1, enabled=False)
+        self.rl_fill = Entity(parent=self.rl_bg, model='quad', origin=(0.5, 0), position=(0.5, 0, -0.01), scale=(1, 0.7), color=color.rgb32(240, 196, 90), shader=unlit_shader)
         self.hint = ui_text(self.root, '', px=15, color=color.rgba(1, 1, 1, 0.85))
         self.bars = []
         for _ in range(4):
@@ -2069,7 +2109,7 @@ class HUD:
         self.clock.position = (0, 0.45)
         self.threat.position = (0, 0.4)
         self.kills.position = (window.top_left.x + 0.06, window.top_left.y - 0.06)
-        self.hint.position = (0, 0.16)
+        self.hint.position = (0, -0.28)
         frac = player.hp / player.max_hp
         self.hp_fill.scale_x = max(0.001, frac)
         self.hp_fill.color = color.rgb32(210, 54, 46) if frac > 0.3 else color.rgb32(255, 80, 60)
@@ -2080,6 +2120,10 @@ class HUD:
         self.threat.color = (color.rgb32(120, 196, 140), color.rgb32(230, 196, 80), color.rgb32(232, 120, 48), color.rgb32(220, 64, 52))[index]
         self.kills.text = f'KILLS  {game.kills}'
         rifle = player.rifle
+        self.rl_bg.position = (br.x - 0.08, br.y + 0.048)
+        self.rl_bg.enabled = playing and rifle.reloading
+        if rifle.reloading:
+            self.rl_fill.scale_x = max(0.001, 1 - rifle.reload_t / RELOAD_TIME)
         if rifle.reloading:
             self.ammo.text = 'RELOADING'
             self.ammo.color = color.rgb32(240, 196, 90)
@@ -2102,9 +2146,9 @@ class HUD:
         if playing:
             center = raycast(camera.world_position, camera.forward, distance=80, ignore=[player])
             aimed = victim_from(center.entity) is not None if center.hit else False
-        gap = 0.0045 + rifle.spread_now() * 1.15
-        length = 0.011
-        thick = 0.0015
+        gap = 0.007 + rifle.spread_now() * 1.35
+        length = 0.016
+        thick = 0.0021
         col = color.rgba(1, 0.35, 0.28, 0.95) if aimed else color.rgba(1, 0.96, 0.92, 0.88)
         specs = (
             ((0, gap + length / 2), (thick, length)),
